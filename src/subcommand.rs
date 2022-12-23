@@ -438,6 +438,35 @@ impl Subcommand {
     search: &Search,
     justfile: Justfile<'src>,
   ) -> Result<(), Error<'src>> {
+    // Construct a target to alias map.
+    let mut recipe_aliases: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for alias in justfile.aliases.values() {
+      if alias.is_private() {
+        continue;
+      }
+
+      if recipe_aliases.contains_key(alias.target.name.lexeme()) {
+        let aliases = recipe_aliases.get_mut(alias.target.name.lexeme()).unwrap();
+        aliases.push(alias.name.lexeme());
+      } else {
+        recipe_aliases.insert(alias.target.name.lexeme(), vec![alias.name.lexeme()]);
+      }
+    }
+
+    if evaluate {
+      todo!()
+    } else {
+      return Self::list_inner(
+        config,
+        justfile
+          .public_recipes(config.unsorted)
+          .iter()
+          .map(|recipe| (recipe.name(), recipe.parameters.clone(), recipe.doc))
+          .collect(),
+        recipe_aliases,
+      );
+    }
+
     let dotenv = if config.load_dotenv {
       load_dotenv(config, &justfile.settings, &search.working_directory)?
     } else {
@@ -460,21 +489,6 @@ impl Subcommand {
     let mut evaluator = scope
       .as_ref()
       .map(|scope| Evaluator::recipe_evaluator(config, &dotenv, scope, &justfile.settings, search));
-
-    // Construct a target to alias map.
-    let mut recipe_aliases: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for alias in justfile.aliases.values() {
-      if alias.is_private() {
-        continue;
-      }
-
-      if recipe_aliases.contains_key(alias.target.name.lexeme()) {
-        let aliases = recipe_aliases.get_mut(alias.target.name.lexeme()).unwrap();
-        aliases.push(alias.name.lexeme());
-      } else {
-        recipe_aliases.insert(alias.target.name.lexeme(), vec![alias.name.lexeme()]);
-      }
-    }
 
     let mut line_widths: BTreeMap<&str, usize> = BTreeMap::new();
     let mut evaluated_parameters: BTreeMap<&str, BTreeMap<&str, Parameter<String>>> =
@@ -567,6 +581,73 @@ impl Subcommand {
           (0, None) => (),
           _ => {
             let alias_doc = format!("alias for `{}`", recipe.name);
+            print_doc(&alias_doc);
+          }
+        }
+        println!();
+      }
+    }
+
+    Ok(())
+  }
+
+  fn list_inner<'src, T: Display>(
+    config: &Config,
+    recipes: Vec<(&str, Vec<Parameter<T>>, Option<&str>)>,
+    recipe_aliases: BTreeMap<&str, Vec<&str>>,
+  ) -> Result<(), Error<'src>> {
+    let mut line_widths: BTreeMap<&str, usize> = BTreeMap::new();
+
+    for (name, parameters, _doc) in &recipes {
+      for name in iter::once(name).chain(recipe_aliases.get(name).unwrap_or(&Vec::new())) {
+        let mut line_width = UnicodeWidthStr::width(*name);
+
+        for parameter in parameters {
+          line_width += UnicodeWidthStr::width(
+            format!(" {}", parameter.color_display(Color::never())).as_str(),
+          );
+        }
+
+        if line_width <= 30 {
+          line_widths.insert(name, line_width);
+        }
+      }
+    }
+
+    let max_line_width = cmp::min(line_widths.values().copied().max().unwrap_or(0), 30);
+
+    let doc_color = config.color.stdout().doc();
+    print!("{}", config.list_heading);
+
+    for (recipe_name, parameters, doc) in recipes {
+      for (i, name) in iter::once(&recipe_name)
+        .chain(recipe_aliases.get(recipe_name).unwrap_or(&Vec::new()))
+        .enumerate()
+      {
+        print!("{}{}", config.list_prefix, name);
+        for parameter in &parameters {
+          print!(" {}", parameter.color_display(config.color.stdout()))
+        }
+
+        // Declaring this outside of the nested loops will probably be more efficient,
+        // but it creates all sorts of lifetime issues with variables inside the loops.
+        // If this is inlined like the docs say, it shouldn't make any difference.
+        let print_doc = |doc| {
+          print!(
+            " {:padding$}{} {}",
+            "",
+            doc_color.paint("#"),
+            doc_color.paint(doc),
+            padding = max_line_width
+              .saturating_sub(line_widths.get(name).copied().unwrap_or(max_line_width))
+          );
+        };
+
+        match (i, doc) {
+          (0, Some(doc)) => print_doc(doc),
+          (0, None) => (),
+          _ => {
+            let alias_doc = format!("alias for `{}`", recipe_name);
             print_doc(&alias_doc);
           }
         }
